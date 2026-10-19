@@ -92,7 +92,7 @@ def simulate(n: int, p: float, replications: int, seed: int) -> dict[str, Any]:
 
 def export_excel(result: dict[str, Any], sim: dict[str, Any] | None = None,
                  space: list[dict[str, Any]] | None = None,
-                 case_label: str = "Kasus bebas") -> bytes:
+                 case_label: str = "Kasus bebas", cdf_k: int | None = None) -> bytes:
     """Ekspor xlsx termasuk grafik Excel asli yang dapat diedit/dicetak.
 
     Parameter n/p terdapat di Ringkasan. Distribusi memakai formula Excel,
@@ -101,6 +101,9 @@ def export_excel(result: dict[str, Any], sim: dict[str, Any] | None = None,
     """
     n = result["n"]
     p = result["p"]
+    cdf_k = result["y"] if cdf_k is None else int(cdf_k)
+    if not 0 <= cdf_k <= n:
+        raise ValueError("Batas kumulatif k harus berada pada rentang 0 sampai n.")
     mask = result["mask"]
     pmf = result["pmf"]
     cdf = result["cdf"]
@@ -139,6 +142,7 @@ def export_excel(result: dict[str, Any], sim: dict[str, Any] | None = None,
 
     summary = book.add_worksheet("Ringkasan")
     data = book.add_worksheet("Distribusi")
+    cumulative = book.add_worksheet("Kumulatif")
     graph = book.add_worksheet("Grafik")
     simsheet = book.add_worksheet("Simulasi") if sim is not None else None
     samplesheet = book.add_worksheet("Ruang Sampel") if space else None
@@ -214,7 +218,17 @@ def export_excel(result: dict[str, Any], sim: dict[str, Any] | None = None,
         p_sim = float(counts[k] / reps) if reps else 0.0
         fmt = highlight if chosen else value
         data.write_number(r0, 0, k, integer)
-        formula = f"=COMBIN(Ringkasan!$B$5,A{excelrow})*(Ringkasan!$B$6^A{excelrow})*((1-Ringkasan!$B$6)^(Ringkasan!$B$5-A{excelrow}))"
+        # Lindungi perhitungan Excel ketika p=0 atau p=1 (0^0 tidak portabel).
+        binom_expr = (
+            f"COMBIN(Ringkasan!$B$5,A{excelrow})*"
+            f"(Ringkasan!$B$6^A{excelrow})*"
+            f"((1-Ringkasan!$B$6)^(Ringkasan!$B$5-A{excelrow}))"
+        )
+        formula = (
+            f"=IF(Ringkasan!$B$6=0,IF(A{excelrow}=0,1,0),"
+            f"IF(Ringkasan!$B$6=1,IF(A{excelrow}=Ringkasan!$B$5,1,0),"
+            f"{binom_expr}))"
+        )
         data.write_formula(r0, 1, formula, fmt, pmf_val)
         data.write_formula(r0, 2, f"=B{excelrow}-D{excelrow}", pct, 0 if chosen else pmf_val)
         data.write_formula(r0, 3, f'=IF(E{excelrow}="YA",B{excelrow},0)', highlight_pct if chosen else pct,
@@ -241,6 +255,103 @@ def export_excel(result: dict[str, Any], sim: dict[str, Any] | None = None,
     data.set_landscape()
     data.repeat_rows(0, 3)
     data.print_area(0, 0, n + 5, 9)
+
+    # Praktikum CDF: referensi seluruh PMF/CDF ke lembar Distribusi.
+    # Jika p berubah pada Ringkasan!B6, hasil dan grafik ini ikut menghitung ulang.
+    # k pada Kumulatif!B5 adalah input yang bisa diedit langsung di Excel.
+    cumulative.hide_gridlines(2)
+    cumulative.set_column("A:A", 28)
+    cumulative.set_column("B:C", 20)
+    cumulative.set_column("D:F", 21)
+    cumulative.set_column("G:G", 3)
+    cumulative.set_column("H:R", 11)
+    cumulative.set_row(0, 32)
+    cumulative.merge_range("A1:R1", "PRAKTIKUM — PROBABILITAS KUMULATIF BINOMIAL", title)
+    cumulative.merge_range("A2:R2", "F(k) = P(Y ≤ k) = jumlah P(Y=j) untuk j = 0, 1, ..., k", subtitle)
+    cumulative.write("A3", "Jumlah percobaan (n)", label)
+    cumulative.write_formula("B3", "=Ringkasan!B5", integer, n)
+    cumulative.write("A4", "Probabilitas sukses (p)", label)
+    cumulative.write_formula("B4", "=Ringkasan!B6", inp, p)
+    cumulative.write("A5", "Batas paling banyak (k) — EDIT", label)
+    cumulative.write_number("B5", cdf_k, inp_int)
+    cumulative.data_validation("B5", {
+        "validate": "integer", "criteria": "between", "minimum": 0,
+        "maximum": n,
+        "input_title": "Batas kumulatif k",
+        "input_message": "Masukkan bilangan bulat 0 sampai n",
+    })
+    cumulative.write("A6", "Probabilitas P(Y≤k)", label)
+    cumulative.write("A7", "Komplemen P(Y>k)", label)
+    cumulative.merge_range("A8:F8", "Baris berwarna hijau menunjukkan Y ≤ k. Ubah B5 untuk mencoba batas lain.", note)
+    cdf_headers = ["Y (jumlah sukses)", "P(Y=y)", "F(y) = P(Y≤y)",
+                   "P terpilih (≤k)", "Dipilih?", "P tidak terpilih"]
+    for col, head in enumerate(cdf_headers):
+        cumulative.write(9, col, head, header)
+    cumulative.set_row(9, 34)
+    for k in range(n + 1):
+        row0 = k + 10
+        row_xl = row0 + 1
+        dist_xl = k + 5
+        cdf_selected = bool(k <= cdf_k)
+        chosen_val = float(pmf[k]) if cdf_selected else 0.0
+        cumulative.write_number(row0, 0, k, integer)
+        cumulative.write_formula(row0, 1, f"=Distribusi!B{dist_xl}", value, float(pmf[k]))
+        cumulative.write_formula(row0, 2, f"=Distribusi!F{dist_xl}", pct, float(cdf[k]))
+        cumulative.write_formula(row0, 3, f'=IF(A{row_xl}<=$B$5,B{row_xl},0)',
+                                 pct, chosen_val)
+        cumulative.write_formula(row0, 4, f'=IF(A{row_xl}<=$B$5,"YA","TIDAK")',
+                                 text_center, "YA" if cdf_selected else "TIDAK")
+        cumulative.write_formula(row0, 5, f"=B{row_xl}-D{row_xl}", pct,
+                                 0.0 if cdf_selected else float(pmf[k]))
+    last_row = n + 11
+    chosen_row_format = book.add_format({"bg_color": green, "font_color": "#136A39"})
+    cumulative.conditional_format(10, 0, n + 10, 5, {
+        "type": "formula", "criteria": "=$A11<=$B$5", "format": chosen_row_format
+    })
+    cdf_val = float(cdf[cdf_k])
+    cumulative.write_formula("B6", f"=SUM(D11:D{last_row})", highlight_pct, cdf_val)
+    cumulative.write_formula("B7", "=1-B6", pct, 1.0 - cdf_val)
+    cumulative.freeze_panes(10, 1)
+    cumulative.autofilter(9, 0, n + 10, 5)
+
+    chart_cdf_pmf = book.add_chart({"type": "column", "subtype": "stacked"})
+    for col, name, color in [
+        ("F", "Di luar (Y > k)", "#B8D1E5"),
+        ("D", "Termasuk (Y ≤ k)", teal),
+    ]:
+        chart_cdf_pmf.add_series({
+            "name": name,
+            "categories": f"=Kumulatif!$A$11:$A${last_row}",
+            "values": f"=Kumulatif!${col}$11:${col}${last_row}",
+            "fill": {"color": color}, "border": {"none": True},
+        })
+    chart_cdf_pmf.set_title({"name": "Probabilitas P(Y=y), dipilih Y ≤ k"})
+    chart_cdf_pmf.set_x_axis({"name": "Jumlah sukses (y)"})
+    chart_cdf_pmf.set_y_axis({"name": "Probabilitas", "num_format": "0%", "min": 0})
+    chart_cdf_pmf.set_legend({"position": "bottom"})
+    chart_cdf_pmf.set_size({"width": 680, "height": 335})
+    cumulative.insert_chart("H4", chart_cdf_pmf)
+
+    chart_cdf_line = book.add_chart({"type": "line"})
+    chart_cdf_line.add_series({
+        "name": "P(Y≤y)",
+        "categories": f"=Kumulatif!$A$11:$A${last_row}",
+        "values": f"=Kumulatif!$C$11:$C${last_row}",
+        "line": {"color": "#2E86AB", "width": 2.5},
+        "marker": {"type": "circle", "size": 5,
+                   "border": {"color": "#2E86AB"}, "fill": {"color": "#FFFFFF"}},
+    })
+    chart_cdf_line.set_title({"name": "CDF: F(y) = P(Y≤y)"})
+    chart_cdf_line.set_x_axis({"name": "Jumlah sukses (y)"})
+    chart_cdf_line.set_y_axis({"name": "Probabilitas kumulatif", "num_format": "0%",
+                               "min": 0, "max": 1})
+    chart_cdf_line.set_legend({"none": True})
+    chart_cdf_line.set_size({"width": 680, "height": 335})
+    cumulative.insert_chart("H23", chart_cdf_line)
+    cumulative.set_landscape()
+    cumulative.fit_to_pages(1, 0)
+    cumulative.repeat_rows(0, 9)
+    cumulative.print_area(0, 0, max(n + 10, 43), 17)
 
     graph.hide_gridlines(2)
     graph.set_column("A:A", 3)
